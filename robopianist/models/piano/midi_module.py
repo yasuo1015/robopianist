@@ -49,6 +49,7 @@ class MidiModule:
         physics: mjcf.Physics,
         activation: np.ndarray,
         sustain_activation: np.ndarray,
+        key_qvel: Optional[np.ndarray] = None,
     ) -> None:
         # Sanity check dtype since we use bitwise operators.
         assert activation.dtype == bool
@@ -62,11 +63,17 @@ class MidiModule:
 
         # Note on events.
         for key_id in np.flatnonzero(state_change & ~self._prev_activation):
+            if key_qvel is not None:
+                max_expected_qvel = 2.0
+                normalized_vel = np.clip(
+                    abs(key_qvel[key_id]) / max_expected_qvel, 0.0, 1.0
+                )
+                midi_velocity = int(1 + normalized_vel * 126)
+            else:
+                midi_velocity = 127
             message = midi_message.NoteOn(
                 note=midi_file.key_number_to_midi_number(key_id),
-                # TODO(kevin): In the future, we will replace this with the actual
-                # key velocity. For now, we hardcode it to the maximum velocity.
-                velocity=127,
+                velocity=midi_velocity,
                 time=physics.data.time,
             )
             timestep_events.append(message)

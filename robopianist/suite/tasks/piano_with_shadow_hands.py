@@ -39,11 +39,35 @@ _KEY_CLOSE_ENOUGH_TO_PRESSED = 0.05
 # Energy penalty coefficient.
 _ENERGY_PENALTY_COEF = 5e-3
 
+# Velocity reward: qvel normalization and VAS-style Gaussian (margin 0.2).
+_MAX_EXPECTED_QVEL = 2.0
+_VAS_ERROR_MARGIN = 0.2
+
 # Transparency of fingertip geoms.
 _FINGERTIP_ALPHA = 1.0
 
 # Bounds for the uniform distribution from which initial hand offset is sampled.
 _POSITION_OFFSET = 0.05
+
+
+class TactileNormalizer:
+    """Online normalizer for tactile signals using running statistics."""
+
+    def __init__(self, dim: int, clip_range: float = 5.0) -> None:
+        self.running_mean = np.zeros(dim)
+        self.running_var = np.ones(dim)
+        self.count = 0
+        self.clip_range = clip_range
+
+    def normalize(self, x: np.ndarray) -> np.ndarray:
+        self.count += 1
+        delta = x - self.running_mean
+        self.running_mean += delta / self.count
+        self.running_var += delta * (x - self.running_mean)
+
+        std = np.sqrt(self.running_var / max(self.count, 1)) + 1e-8
+        normalized = (x - self.running_mean) / std
+        return np.clip(normalized, -self.clip_range, self.clip_range)
 
 
 class PianoWithShadowHands(base.PianoTask):
@@ -62,6 +86,9 @@ class PianoWithShadowHands(base.PianoTask):
         augmentations: Optional[Sequence[base_variation.Variation]] = None,
         energy_penalty_coef: float = _ENERGY_PENALTY_COEF,
         randomize_hand_positions: bool = False,
+        enable_tactile: bool = False,
+        enable_velocity_reward: bool = False,
+        velocity_reward_start_step: int = 0,
         **kwargs,
     ) -> None:
         """Task constructor.
@@ -94,6 +121,12 @@ class PianoWithShadowHands(base.PianoTask):
             energy_penalty_coef: Coefficient for the energy penalty.
             randomize_hand_positions: If True, randomizes the initial position of the
                 hands at the beginning of each episode.
+            enable_tactile: If True, enables tactile feedback observables
+                (fingertip_force, actuators_force, actuators_velocity).
+            enable_velocity_reward: If True, adds a reward term for matching key press
+                velocity to the target MIDI velocity.
+            velocity_reward_start_step: If > 0, velocity_reward returns 0 until global
+                step >= this value. Requires wrapper to set _velocity_reward_curriculum_step.
         """
         super().__init__(arena=stage.Stage(), **kwargs)
 
@@ -117,6 +150,10 @@ class PianoWithShadowHands(base.PianoTask):
         self._augmentations = augmentations
         self._energy_penalty_coef = energy_penalty_coef
         self._randomize_hand_positions = randomize_hand_positions
+        self._enable_tactile = enable_tactile
+        self._enable_velocity_reward = enable_velocity_reward
+        self._velocity_reward_start_step = velocity_reward_start_step
+        self._velocity_reward_curriculum_step = 0
 
         if not disable_fingering_reward and not disable_colorization:
             self._colorize_fingertips()
@@ -142,6 +179,11 @@ class PianoWithShadowHands(base.PianoTask):
 
         if not self._disable_forearm_reward:
             self._reward_fn.add("forearm_reward", self._compute_forearm_reward)
+
+        if self._enable_velocity_reward:
+            self._reward_fn.add(
+                "velocity_reward", self._compute_velocity_reward
+            )
 
     def _reset_quantities_at_episode_init(self) -> None:
         self._t_idx: int = 0
@@ -366,7 +408,53 @@ class PianoWithShadowHands(base.PianoTask):
             margin=(_FINGER_CLOSE_ENOUGH_TO_KEY * 10),
             sigmoid="gaussian",
         )
-        return float(np.mean(rews))        
+        return float(np.mean(rews))
+
+    def _compute_velocity_reward(self, physics: mjcf.Physics) -> float:
+        """Reward for matching key press velocity to target MIDI velocity.
+
+        Method 3 (gate): only gives reward when key_press is good.
+        Method 8 (multiplicative): returns velocity_score * key_press_reward.
+        If velocity_reward_start_step > 0, returns 0 until global step >= that value.
+        """
+        if (
+            self._velocity_reward_start_step > 0
+            and self._velocity_reward_curriculum_step < self._velocity_reward_start_step
+        ):
+            return 0.0
+        key_press_reward = self._compute_key_press_reward(physics)
+        _DPS_GATE_THRESHOLD = 0.5
+        if key_press_reward < _DPS_GATE_THRESHOLD:
+            return 0.0
+
+        on_keys = np.flatnonzero(self._goal_current[:-1])
+        if on_keys.size == 0:
+            return 0.0
+
+        t = min(self._t_idx, len(self._notes) - 1)
+        current_notes = self._notes[t]
+        target_vel_map = {note.key: note.velocity for note in current_notes}
+
+        key_qvel = np.abs(physics.bind(self.piano.joints).qvel)
+
+        scores = []
+        for key_id in sorted(on_keys):
+            target_vel = target_vel_map.get(key_id, 80)
+            target_normalized = target_vel / 127.0
+            actual_normalized = np.clip(
+                key_qvel[key_id] / _MAX_EXPECTED_QVEL, 0.0, 1.0
+            )
+            if actual_normalized < 0.05:
+                continue
+            error = abs(target_normalized - actual_normalized) / 1.0
+            score = np.exp(-(error ** 2) / (2 * _VAS_ERROR_MARGIN ** 2))
+            scores.append(score)
+
+        if not scores:
+            return 0.0
+
+        velocity_score = float(np.mean(scores))
+        return 0.1 * velocity_score * key_press_reward
 
     def _update_goal_state(self) -> None:
         # Observable callables get called after `after_step` but before
@@ -420,9 +508,19 @@ class PianoWithShadowHands(base.PianoTask):
             # slider joints (which are in units of meters).
             # "position",
         ]
+
+        tactile_observables = [
+            "fingertip_force",
+            "actuators_force",
+            "actuators_velocity",
+        ]
+
         for hand in [self.right_hand, self.left_hand]:
             for obs in enabled_observables:
                 getattr(hand.observables, obs).enabled = True
+            if self._enable_tactile:
+                for obs in tactile_observables:
+                    getattr(hand.observables, obs).enabled = True
 
         # This returns the current state of the piano keys.
         self.piano.observables.state.enabled = True

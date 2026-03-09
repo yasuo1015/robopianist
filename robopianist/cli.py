@@ -33,7 +33,7 @@ from robopianist.music import midi_file
 
 # Dataset variables.
 _DEFAULT_SAVE_DIR = (
-    robopianist._PROJECT_ROOT / "robopianist" / "music" / "data" / "pig_single_finger"
+    robopianist._PROJECT_ROOT / "robopianist" / "music" / "data" / "pig_midi"
 )
 
 # Soundfont variables.
@@ -210,11 +210,12 @@ class Line:
     def from_line(line: str) -> "Line":
         parts = line.split("\t")
 
-        # Ignore finger substitutions.
-        finger = int(parts[7].split("_")[0])
-        if finger < 0:
-            finger = abs(finger) + 5
-        finger -= 1
+        # # Ignore finger substitutions.
+        # finger = int(parts[7].split("_")[0])
+        # if finger < 0:
+        #     finger = abs(finger) + 5
+        # finger -= 1
+        finger = 0
 
         return Line(
             note_id=int(parts[0]),
@@ -269,23 +270,45 @@ def _preprocess_pig(dataset_dir: Path, save_dir: Path) -> None:
         for line in lines[1:]:
             info.append(Line.from_line(line))
 
-        seq = music_pb2.NoteSequence()
+        pm = pretty_midi.PrettyMIDI()
+        # 创建一个钢琴乐器 (Program 0 = Acoustic Grand Piano)
+        piano_program = pretty_midi.instrument_name_to_program('Acoustic Grand Piano')
+        piano = pretty_midi.Instrument(program=piano_program)
+
         for event in info:
-            seq.notes.add(
-                start_time=event.onset_time,
-                end_time=event.offset_time,
+            # 创建音符
+            note = pretty_midi.Note(
                 velocity=event.onset_velocity,
                 pitch=pretty_midi.note_name_to_number(event.pitch),
-                part=event.finger,
+                start=event.onset_time,
+                end=event.offset_time
             )
-        seq.total_time = info[-1].offset_time
+            piano.notes.append(note)
 
-        # Add metadata.
-        seq.sequence_metadata.title = piece.replace("_", " ").title()
+        # 将乐器添加到 MIDI 对象中
+        pm.instruments.append(piano)
 
-        # Save proto file.
-        filename = save_dir / f"{piece}-{number}.proto"
-        midi_file.MidiFile(seq).save(filename)
+        # 保存为 .mid 文件
+        filename = save_dir / f"{piece}-{number}.mid"
+        pm.write(str(filename))
+
+        # seq = music_pb2.NoteSequence()
+        # for event in info:
+        #     seq.notes.add(
+        #         start_time=event.onset_time,
+        #         end_time=event.offset_time,
+        #         velocity=event.onset_velocity,
+        #         pitch=pretty_midi.note_name_to_number(event.pitch),
+        #         part=event.finger,
+        #     )
+        # seq.total_time = info[-1].offset_time
+
+        # # Add metadata.
+        # seq.sequence_metadata.title = piece.replace("_", " ").title()
+
+        # # Save proto file.
+        # filename = save_dir / f"{piece}-{number}.proto"
+        # midi_file.MidiFile(seq).save(filename)
 
 
 def _download_file(url: str) -> None:
