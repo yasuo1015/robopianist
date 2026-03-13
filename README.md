@@ -154,3 +154,13 @@ We would like to thank the following people for making this project possible:
 [MuJoco Menagerie](https://github.com/deepmind/mujoco_menagerie)'s license can be found [here](https://github.com/deepmind/mujoco_menagerie/blob/main/LICENSE). Soundfont licensing information can be found [here](docs/soundfonts.md). MIDI licensing information can be found [here](docs/dataset.md). All other code is licensed under an [Apache-2.0 License](LICENSE).
 
 This is not an officially supported Google product.
+
+## Local Modifications
+
+This repository includes additional task and training modifications on top of the original RoboPianist setup:
+
+- **Tactile feedback enabled**: tactile observations are incorporated to improve contact awareness during piano interaction.
+- **Delayed key-velocity reward**: a key-press velocity (key force/intensity) reward term is introduced only after **1,000,000 training steps** to avoid destabilizing early exploration.
+- **Velocity evaluation metrics added**: evaluation now includes dedicated key-velocity performance metrics, in addition to standard task success and musical metrics.
+
+For implementation details, see [robopianist/wrappers/evaluation.py](robopianist/wrappers/evaluation.py), [robopianist-rl/train.py](robopianist-rl/train.py), and [robopianist-rl/run.sh](robopianist-rl/run.sh).

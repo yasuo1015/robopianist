@@ -15,3 +15,7 @@ robopianist-rl/run_baseline.sh
 .pytest_cache/
 .vscode/
 =1.0.6
+robopianist-rl/jax
+robopianist-rl/__pycache__/
+robopianist-rl/run_baseline.sh
+robopianist-rl/visualize.py
