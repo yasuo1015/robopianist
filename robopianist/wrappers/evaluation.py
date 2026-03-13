@@ -15,12 +15,12 @@
 """A wrapper for tracking episode statistics pertaining to music performance.
 
 Includes both the original F1-based key press / sustain metrics and dynamic
-performance metrics (VRS, DCS, GCS, VAS) that evaluate the musical expressiveness
+performance metrics (VRS, GCS, VAS, DPS) that evaluate the musical expressiveness
 of a performance based on MIDI velocity information.
 """
 
 from collections import deque
-from typing import Deque, Dict, List, NamedTuple, Optional, Sequence, Tuple
+from typing import Deque, Dict, List, NamedTuple, Optional, Sequence
 
 import dm_env
 import numpy as np
@@ -48,43 +48,6 @@ def compute_velocity_range_score(velocities: np.ndarray) -> float:
     range_ratio = (v_max - v_min) / 126.0
     std_ratio = np.std(velocities) / 63.5
     return float(np.clip(0.5 * range_ratio + 0.5 * std_ratio, 0.0, 1.0))
-
-
-def compute_dynamic_contrast_score(
-    velocities: np.ndarray,
-    beat_positions: np.ndarray,
-    beats_per_measure: int = 4,
-) -> float:
-    """Dynamic Contrast Score (DCS): strong-beat vs. weak-beat velocity contrast.
-
-    In 4/4 time beats 0 and 2 are strong; in 3/4 only beat 0.
-    A well-shaped performance shows moderate contrast (~0.15 on a [0, 1] scale).
-
-    Returns a value in [0, 1].
-    """
-    if len(velocities) < 2 or len(beat_positions) < 2:
-        return 0.5
-
-    if beats_per_measure == 4:
-        strong = {0, 2}
-    elif beats_per_measure == 3:
-        strong = {0}
-    else:
-        strong = {0}
-
-    int_beats = np.floor(beat_positions).astype(int) % beats_per_measure
-    strong_mask = np.isin(int_beats, list(strong))
-
-    if not strong_mask.any() or strong_mask.all():
-        return 0.5
-
-    mean_strong = velocities[strong_mask].mean()
-    mean_weak = velocities[~strong_mask].mean()
-    contrast = (mean_strong - mean_weak) / 127.0
-
-    ideal_contrast = 0.15
-    dcs = float(np.exp(-((contrast - ideal_contrast) ** 2) / (2 * 0.1 ** 2)))
-    return np.clip(dcs, 0.0, 1.0)
 
 
 def compute_gradual_change_smoothness(velocities: np.ndarray) -> float:
@@ -124,17 +87,15 @@ def compute_velocity_accuracy_score(
 
 def compute_dynamic_performance_score(
     vrs: float,
-    dcs: float,
     gcs: float,
     vas: float,
     weights: Optional[Dict[str, float]] = None,
 ) -> float:
-    """Weighted combination of VRS, DCS, GCS, VAS into a single DPS value."""
+    """Weighted combination of VRS, GCS, VAS into a single DPS value."""
     if weights is None:
-        weights = {"vrs": 0.2, "dcs": 0.1, "gcs": 0.1, "vas": 0.6}
+        weights = {"vrs": 0.2, "gcs": 0.1, "vas": 0.7}
     return float(
         weights["vrs"] * vrs
-        + weights["dcs"] * dcs
         + weights["gcs"] * gcs
         + weights["vas"] * vas
     )
@@ -156,36 +117,9 @@ class DynamicsMetrics(NamedTuple):
     """Container for dynamic performance metrics of a single episode."""
 
     velocity_range_score: float
-    dynamic_contrast_score: float
     gradual_change_smoothness: float
     velocity_accuracy_score: float
     dynamic_performance_score: float
-
-
-# ---------------------------------------------------------------------------
-# Helper: extract tempo / time-signature from the task's MIDI
-# ---------------------------------------------------------------------------
-
-def _extract_beat_info(
-    task,
-) -> Tuple[float, int]:
-    """Return (seconds_per_beat, beats_per_measure) from the task's MIDI file."""
-    try:
-        midi = task._midi
-        seq = midi.seq
-        if seq.tempos:
-            qpm = seq.tempos[0].qpm
-        else:
-            qpm = 120.0
-        if seq.time_signatures:
-            beats_per_measure = seq.time_signatures[0].numerator
-        else:
-            beats_per_measure = 4
-    except Exception:
-        qpm = 120.0
-        beats_per_measure = 4
-    seconds_per_beat = 60.0 / max(qpm, 1.0)
-    return seconds_per_beat, beats_per_measure
 
 
 # ---------------------------------------------------------------------------
@@ -200,7 +134,7 @@ class MidiEvaluationWrapper(EnvironmentWrapper):
     `get_musical_metrics()`.
 
     When the task exposes a MIDI module (via ``task.piano.midi_module``), dynamic
-    performance metrics (VRS, DCS, GCS, VAS, DPS) are also computed from the
+    performance metrics (VRS, GCS, VAS, DPS) are also computed from the
     NoteOn velocity values generated during the episode.
 
     By default, `deque_size` is set to 1 which means that only the current episode's
@@ -225,7 +159,6 @@ class MidiEvaluationWrapper(EnvironmentWrapper):
 
         # Dynamic performance metrics.
         self._vrs_scores: Deque[float] = deque(maxlen=deque_size)
-        self._dcs_scores: Deque[float] = deque(maxlen=deque_size)
         self._gcs_scores: Deque[float] = deque(maxlen=deque_size)
         self._vas_scores: Deque[float] = deque(maxlen=deque_size)
         self._dps_scores: Deque[float] = deque(maxlen=deque_size)
@@ -251,7 +184,6 @@ class MidiEvaluationWrapper(EnvironmentWrapper):
 
             dynamics = self._compute_dynamics_metrics()
             self._vrs_scores.append(dynamics.velocity_range_score)
-            self._dcs_scores.append(dynamics.dynamic_contrast_score)
             self._gcs_scores.append(dynamics.gradual_change_smoothness)
             self._vas_scores.append(dynamics.velocity_accuracy_score)
             self._dps_scores.append(dynamics.dynamic_performance_score)
@@ -285,7 +217,6 @@ class MidiEvaluationWrapper(EnvironmentWrapper):
         if self._dps_scores:
             metrics.update({
                 "velocity_range_score": _mean(self._vrs_scores),
-                "dynamic_contrast_score": _mean(self._dcs_scores),
                 "gradual_change_smoothness": _mean(self._gcs_scores),
                 "velocity_accuracy_score": _mean(self._vas_scores),
                 "dynamic_performance_score": _mean(self._dps_scores),
@@ -301,13 +232,11 @@ class MidiEvaluationWrapper(EnvironmentWrapper):
 
         # --- Collect actual velocities from the piano's MIDI module ---
         actual_vels: List[int] = []
-        actual_times: List[float] = []
         try:
             all_msgs = task.piano.midi_module.get_all_midi_messages()
             for msg in all_msgs:
                 if isinstance(msg, NoteOn):
                     actual_vels.append(msg.velocity)
-                    actual_times.append(msg.time)
         except Exception:
             pass
 
@@ -325,23 +254,14 @@ class MidiEvaluationWrapper(EnvironmentWrapper):
         actual_arr = np.array(actual_vels, dtype=np.int32)
         target_arr = np.array(target_vels, dtype=np.int32)
 
-        # --- Beat position for each actual note ---
-        seconds_per_beat, beats_per_measure = _extract_beat_info(task)
-        if len(actual_times) > 0 and seconds_per_beat > 0:
-            beat_positions = np.array(actual_times) / seconds_per_beat
-        else:
-            beat_positions = np.array([], dtype=np.float64)
-
         # --- Compute sub-metrics ---
         vrs = compute_velocity_range_score(actual_arr)
-        dcs = compute_dynamic_contrast_score(actual_arr, beat_positions, beats_per_measure)
         gcs = compute_gradual_change_smoothness(actual_arr)
         vas = compute_velocity_accuracy_score(actual_arr, target_arr)
-        dps = compute_dynamic_performance_score(vrs, dcs, gcs, vas)
+        dps = compute_dynamic_performance_score(vrs, gcs, vas)
 
         return DynamicsMetrics(
             velocity_range_score=vrs,
-            dynamic_contrast_score=dcs,
             gradual_change_smoothness=gcs,
             velocity_accuracy_score=vas,
             dynamic_performance_score=dps,

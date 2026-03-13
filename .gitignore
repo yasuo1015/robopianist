@@ -7,3 +7,11 @@ build/
 dist/
 pig_single_finger/
 robopianist/music/data/
+PianoFingeringDataset_v1.2/
+__MACOSX/
+docs/thesis_outline.tex
+result/
+robopianist-rl/run_baseline.sh
+.pytest_cache/
+.vscode/
+=1.0.6
